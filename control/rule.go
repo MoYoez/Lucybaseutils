@@ -2,35 +2,21 @@
 package control
 
 import (
-	"encoding/base64"
-	"image"
-	"image/jpeg"
-	"os"
-	"strconv"
-	"strings"
-	"sync"
-
-	"github.com/sirupsen/logrus"
 	zero "github.com/wdvxdr1123/ZeroBot"
 	"github.com/wdvxdr1123/ZeroBot/extension"
 	"github.com/wdvxdr1123/ZeroBot/message"
+	"os"
+	"strconv"
+	"strings"
 
-	"github.com/FloatTech/floatbox/binary"
-	"github.com/FloatTech/floatbox/file"
-	"github.com/FloatTech/imgfactory"
-	"github.com/FloatTech/rendercard"
 	ctrl "github.com/FloatTech/zbpctrl"
-
-	"github.com/FloatTech/zbputils/ctxext"
 )
 
 const (
 	// StorageFolder 插件控制数据目录
 	StorageFolder = "data/control/"
 	// Md5File ...
-	Md5File = StorageFolder + "stor.spb"
-	dbfile  = StorageFolder + "plugins.db"
-	lnfile  = StorageFolder + "lnperpg.txt"
+	dbfile = StorageFolder + "plugins.db"
 )
 
 var (
@@ -80,20 +66,6 @@ func init() {
 		panic(err)
 	}
 	// 载入用户配置
-	if file.IsExist(lnfile) {
-		data, err := os.ReadFile(lnfile)
-		if err != nil {
-			logrus.Warnln("[control] 读取配置文件失败,将使用默认的显示行数:", err)
-		} else {
-			mun, err := strconv.Atoi(binary.BytesToString(data))
-			if err != nil {
-				logrus.Warnln("[control] 获取设置的服务列表显示行数错误,将使用默认的显示行数:", err)
-			} else if mun > 0 {
-				lnperpg = mun
-				logrus.Infoln("[control] 获取到当前设置的服务列表显示行数为:", lnperpg)
-			}
-		}
-	}
 	zero.OnCommandGroup([]string{
 		"响应", "response", "沉默", "silence",
 	}, zero.UserOrGrpAdmin, zero.OnlyToMe).SetBlock(true).SecondPriority().Handle(func(ctx *zero.Ctx) {
@@ -418,121 +390,5 @@ func init() {
 			return
 		}
 		ctx.SendChain(message.Text("已改变全局默认启用状态: " + model.Args))
-	})
-
-	zero.OnCommandGroup([]string{"用法", "usage"}, zero.OnlyToMe).SetBlock(true).SecondPriority().
-		Handle(func(ctx *zero.Ctx) {
-			model := extension.CommandModel{}
-			_ = ctx.Parse(&model)
-			service, ok := Lookup(model.Args)
-			if !ok {
-				ctx.SendChain(message.Text("没有找到指定服务!"))
-				return
-			}
-			if service.Options.Help == "" {
-				ctx.SendChain(message.Text("该服务无帮助!"))
-				return
-			}
-			gid := ctx.Event.GroupID
-			if gid == 0 {
-				gid = -ctx.Event.UserID
-			}
-			// 处理插件帮助并且计算图像高
-			plugininfo := strings.Split(strings.Trim(service.String(), "\n"), "\n")
-			newplugininfo, err := rendercard.Truncate(glowsd, plugininfo, 1272-50, 38)
-			if err != nil {
-				ctx.SendChain(message.Text("ERROR: ", err))
-				return
-			}
-			imgs, err := (&rendercard.Title{
-				LeftTitle:     service.Service,
-				LeftSubtitle:  service.Options.Brief,
-				RightTitle:    "FloatTech",
-				RightSubtitle: "ZeroBot-Plugin",
-				ImagePath:     kanbanpath + "kanban.png",
-				TitleFontData: impactd,
-				TextFontData:  glowsd,
-				IsEnabled:     service.IsEnabledIn(gid),
-			}).DrawTitleWithText(newplugininfo)
-			if err != nil {
-				ctx.SendChain(message.Text("ERROR: ", err))
-				return
-			}
-			data, err := imgfactory.ToBytes(imgs) // 生成图片
-			if err != nil {
-				ctx.SendChain(message.Text("ERROR: ", err))
-				return
-			}
-			if id := ctx.SendChain(message.ImageBytes(data)); id.ID() == 0 {
-				ctx.SendChain(message.Text("ERROR: 可能被风控了"))
-			}
-		})
-
-	zero.OnCommandGroup([]string{"服务列表", "service_list"}, zero.OnlyToMe).SetBlock(true).SecondPriority().
-		Handle(func(ctx *zero.Ctx) {
-			gid := ctx.Event.GroupID
-			if gid == 0 {
-				gid = -ctx.Event.UserID
-			}
-			var imgs []image.Image
-			imgs, err = drawservicesof(gid)
-			if err != nil {
-				ctx.SendChain(message.Text("ERROR: ", err))
-				return
-			}
-			if len(imgs) > 1 {
-				wg := sync.WaitGroup{}
-				msg := make(message.Message, len(imgs))
-				wg.Add(len(imgs))
-				for i := 0; i < len(imgs); i++ {
-					go func(i int) {
-						defer wg.Done()
-						msg[i] = ctxext.FakeSenderForwardNode(ctx, message.Image(binary.BytesToString(binary.NewWriterF(func(w *binary.Writer) {
-							w.WriteString("base64://")
-							encoder := base64.NewEncoder(base64.StdEncoding, w)
-							var opt jpeg.Options
-							opt.Quality = 70
-							if err1 := jpeg.Encode(encoder, imgs[i], &opt); err1 != nil {
-								err = err1
-								return
-							}
-							_ = encoder.Close()
-						}))))
-					}(i)
-				}
-				wg.Wait()
-				if id := ctx.Send(msg); id.ID() == 0 {
-					ctx.SendChain(message.Text("ERROR: 可能被风控了"))
-				}
-			} else {
-				b64, err := imgfactory.ToBase64(imgs[0])
-				if err != nil {
-					ctx.SendChain(message.Text("ERROR: ", err))
-					return
-				}
-				if id := ctx.SendChain(message.Image("base64://" + binary.BytesToString(b64))); id.ID() == 0 {
-					ctx.SendChain(message.Text("ERROR: 可能被风控了"))
-				}
-			}
-		})
-
-	zero.OnCommand("设置服务列表显示行数", zero.SuperUserPermission, zero.OnlyToMe).SetBlock(true).SecondPriority().Handle(func(ctx *zero.Ctx) {
-		model := extension.CommandModel{}
-		_ = ctx.Parse(&model)
-		mun, err := strconv.Atoi(model.Args)
-		if err != nil {
-			ctx.SendChain(message.Text("请输入正确的数字"))
-			return
-		}
-		err = os.WriteFile(lnfile, binary.StringToBytes(model.Args), 0644)
-		if err != nil {
-			ctx.SendChain(message.Text(err))
-			return
-		}
-		lnperpg = mun
-		// 清除缓存
-		titlecache = nil
-		fullpageshadowcache = nil
-		ctx.SendChain(message.Text("已设置列表单页显示数为 " + strconv.Itoa(lnperpg)))
 	})
 }
